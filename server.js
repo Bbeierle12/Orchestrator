@@ -13,6 +13,41 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json());
 
+// Helper function to validate and sanitize paths
+function validatePath(inputPath) {
+  if (!inputPath || typeof inputPath !== 'string') {
+    throw new Error('Invalid path');
+  }
+
+  // Normalize the path to prevent directory traversal
+  const normalizedPath = path.normalize(inputPath);
+  const resolvedPath = path.resolve(normalizedPath);
+
+  // Check for directory traversal attempts
+  if (inputPath.includes('..') || inputPath.includes('./')) {
+    throw new Error('Directory traversal detected');
+  }
+
+  // Additional checks for Windows
+  if (process.platform === 'win32') {
+    // Check for UNC paths or network shares
+    if (normalizedPath.startsWith('\\\\')) {
+      throw new Error('Network paths are not allowed');
+    }
+  }
+
+  return resolvedPath;
+}
+
+// Helper function to validate depth parameter
+function validateDepth(depth) {
+  const parsedDepth = parseInt(depth);
+  if (isNaN(parsedDepth) || parsedDepth < 1 || parsedDepth > 10) {
+    return 3; // Default safe value
+  }
+  return parsedDepth;
+}
+
 // Helper function to get file stats
 // Returns size in KB (kilobytes) to match frontend expectations
 async function getFileStats(filePath) {
@@ -101,8 +136,12 @@ app.post('/api/scan', async (req, res) => {
       return res.status(400).json({ error: 'Path is required' });
     }
 
-    console.log(`Scanning directory: ${scanPath}`);
-    const result = await scanDirectory(scanPath, maxDepth);
+    // Validate and sanitize inputs
+    const validatedPath = validatePath(scanPath);
+    const validatedDepth = validateDepth(maxDepth);
+
+    console.log(`Scanning directory: ${validatedPath} with depth: ${validatedDepth}`);
+    const result = await scanDirectory(validatedPath, validatedDepth);
 
     if (!result) {
       return res.status(404).json({ error: 'Directory not found or inaccessible' });
@@ -133,14 +172,20 @@ app.post('/api/move', async (req, res) => {
       try {
         const { sourcePath, targetPath, action } = move;
 
+        // Validate paths
+        const validatedSource = sourcePath ? validatePath(sourcePath) : null;
+        const validatedTarget = targetPath ? validatePath(targetPath) : null;
+
         if (action === 'delete') {
-          await fs.rm(sourcePath, { recursive: true, force: true });
-          results.push({ success: true, path: sourcePath, action: 'deleted' });
+          if (!validatedSource) throw new Error('Source path is required for delete action');
+          await fs.rm(validatedSource, { recursive: true, force: true });
+          results.push({ success: true, path: validatedSource, action: 'deleted' });
         } else if (action === 'move') {
+          if (!validatedSource || !validatedTarget) throw new Error('Source and target paths are required for move action');
           // Ensure target directory exists
-          await fs.mkdir(path.dirname(targetPath), { recursive: true });
-          await fs.rename(sourcePath, targetPath);
-          results.push({ success: true, from: sourcePath, to: targetPath, action: 'moved' });
+          await fs.mkdir(path.dirname(validatedTarget), { recursive: true });
+          await fs.rename(validatedSource, validatedTarget);
+          results.push({ success: true, from: validatedSource, to: validatedTarget, action: 'moved' });
         }
       } catch (error) {
         results.push({ success: false, error: error.message, move });
@@ -169,12 +214,15 @@ app.post('/api/list-folders', async (req, res) => {
       return res.status(400).json({ error: 'Path is required' });
     }
 
-    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    // Validate and sanitize the path
+    const validatedPath = validatePath(dirPath);
+
+    const entries = await fs.readdir(validatedPath, { withFileTypes: true });
     const folders = entries
       .filter(entry => entry.isDirectory())
       .map(entry => ({
         name: entry.name,
-        path: path.join(dirPath, entry.name)
+        path: path.join(validatedPath, entry.name)
       }));
 
     res.json({ folders });

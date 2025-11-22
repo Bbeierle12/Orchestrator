@@ -106,8 +106,8 @@ export const RecursiveFileNode: React.FC<{ node: FileNode; forceOpen?: boolean }
       forceOpen={forceOpen}
       size={node.size}
     >
-      {node.children?.map((child, i) => (
-        <RecursiveFileNode key={i} node={child} forceOpen={forceOpen} />
+      {node.children?.map((child) => (
+        <RecursiveFileNode key={`${child.name}-${child.type}`} node={child} forceOpen={forceOpen} />
       ))}
     </FolderItem>
   );

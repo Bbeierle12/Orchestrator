@@ -30,15 +30,27 @@ export function FolderBrowser({ isOpen, onClose, onSelect, currentPath }: Folder
     if (isOpen) {
       // Load quick folders
       fetch('/api/quick-folders')
-        .then(res => res.json())
+        .then(res => {
+          if (!res.ok) throw new Error('Backend server not responding');
+          return res.json();
+        })
         .then(data => setQuickFolders(data.folders))
-        .catch(err => console.error('Failed to load quick folders:', err));
+        .catch(err => {
+          console.error('Failed to load quick folders:', err);
+          setError('Backend server is not running. Please start the Express server on port 3001.');
+        });
 
       // Load drives
       fetch('/api/drives')
-        .then(res => res.json())
+        .then(res => {
+          if (!res.ok) throw new Error('Backend server not responding');
+          return res.json();
+        })
         .then(data => setDrives(data.drives))
-        .catch(err => console.error('Failed to load drives:', err));
+        .catch(err => {
+          console.error('Failed to load drives:', err);
+          setError('Backend server is not running. Please start the Express server on port 3001.');
+        });
     }
   }, [isOpen]);
 
@@ -79,11 +91,15 @@ export function FolderBrowser({ isOpen, onClose, onSelect, currentPath }: Folder
         body: JSON.stringify({ path })
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to load folders');
+        if (response.headers.get('content-type')?.includes('text/html')) {
+          throw new Error('Backend server is not running. Please run: npm run server');
+        }
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to load folders');
       }
+
+      const data = await response.json();
 
       setFolders(data.folders);
     } catch (err) {
