@@ -29,18 +29,25 @@ export function FolderBrowser({ isOpen, onClose, onSelect, currentPath }: Folder
   useEffect(() => {
     if (isOpen) {
       // Load quick folders
-      fetch('http://localhost:3001/api/quick-folders')
+      fetch('/api/quick-folders')
         .then(res => res.json())
         .then(data => setQuickFolders(data.folders))
         .catch(err => console.error('Failed to load quick folders:', err));
 
       // Load drives
-      fetch('http://localhost:3001/api/drives')
+      fetch('/api/drives')
         .then(res => res.json())
         .then(data => setDrives(data.drives))
         .catch(err => console.error('Failed to load drives:', err));
     }
   }, [isOpen]);
+
+  // Sync with currentPath prop when it changes
+  useEffect(() => {
+    if (currentPath && isOpen) {
+      setCurrentDir(currentPath);
+    }
+  }, [currentPath, isOpen]);
 
   // Update path input when directory changes
   useEffect(() => {
@@ -66,7 +73,7 @@ export function FolderBrowser({ isOpen, onClose, onSelect, currentPath }: Folder
     setLoading(true);
     setError('');
     try {
-      const response = await fetch('http://localhost:3001/api/list-folders', {
+      const response = await fetch('/api/list-folders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path })

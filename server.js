@@ -14,11 +14,12 @@ app.use(cors());
 app.use(express.json());
 
 // Helper function to get file stats
+// Returns size in KB (kilobytes) to match frontend expectations
 async function getFileStats(filePath) {
   try {
     const stats = await fs.stat(filePath);
     return {
-      size: stats.size,
+      size: Math.round(stats.size / 1024), // Convert bytes to KB
       modified: stats.mtime,
       age: Math.floor((Date.now() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24)) // days
     };

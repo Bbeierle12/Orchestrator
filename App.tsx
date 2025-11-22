@@ -95,7 +95,7 @@ export default function App() {
 
   // Get user's home directory on mount
   React.useEffect(() => {
-    fetch('http://localhost:3001/api/user-home')
+    fetch('/api/user-home')
       .then(res => res.json())
       .then(data => setScanPath(data.path))
       .catch(err => console.error('Failed to get home directory:', err));
@@ -273,7 +273,7 @@ export default function App() {
         addLog(`Scanning real directory: ${scanPath}`, "info");
         setProgress(30);
 
-        const response = await fetch('http://localhost:3001/api/scan', {
+        const response = await fetch('/api/scan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: scanPath, maxDepth: scanDepth })
