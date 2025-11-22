@@ -1,13 +1,13 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { 
-  Layout, 
-  Play, 
-  RotateCcw, 
-  CheckCircle, 
-  HardDrive, 
-  FileCode, 
-  BookOpen, 
-  Trash2, 
+import {
+  Layout,
+  Play,
+  RotateCcw,
+  CheckCircle,
+  HardDrive,
+  FileCode,
+  BookOpen,
+  Trash2,
   FileText,
   ArrowRight,
   Download,
@@ -22,12 +22,14 @@ import {
   ArrowUpAZ,
   ArrowDownWideNarrow,
   ArrowUpWideNarrow,
-  ListFilter
+  ListFilter,
+  FolderOpen
 } from 'lucide-react';
 
 import { INITIAL_FILE_SYSTEM, SOURCE_FILES } from './constants';
 import { AppState, FileSystemState, LogEntry, MoveAction, Tab, FileNode, SortOption } from './types';
 import { FileTree, OptimizedFileTree } from './components/FileTree';
+import { FolderBrowser } from './components/FolderBrowser';
 
 // --- Helper Components ---
 
@@ -74,17 +76,29 @@ const LogLine: React.FC<{ log: LogEntry }> = ({ log }) => {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('SIMULATOR');
-  const [fileSystem] = useState<FileSystemState>(INITIAL_FILE_SYSTEM);
+  const [fileSystem, setFileSystem] = useState<FileSystemState>(INITIAL_FILE_SYSTEM);
   const [proposedMoves, setProposedMoves] = useState<MoveAction[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [appState, setAppState] = useState<AppState>('IDLE'); 
+  const [appState, setAppState] = useState<AppState>('IDLE');
   const [progress, setProgress] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortOption, setSortOption] = useState<SortOption>('name-asc');
+  const [scanPath, setScanPath] = useState<string>('');
+  const [useRealFS, setUseRealFS] = useState(false);
+  const [scanDepth, setScanDepth] = useState(3);
+  const [showFolderBrowser, setShowFolderBrowser] = useState(false);
 
   const addLog = useCallback((msg: string, type: LogEntry['type'] = 'info') => {
     const ts = new Date().toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     setLogs(prev => [{ msg, type, timestamp: ts }, ...prev]);
+  }, []);
+
+  // Get user's home directory on mount
+  React.useEffect(() => {
+    fetch('http://localhost:3001/api/user-home')
+      .then(res => res.json())
+      .then(data => setScanPath(data.path))
+      .catch(err => console.error('Failed to get home directory:', err));
   }, []);
 
   // --- File System Logic (Search & Sort) ---
@@ -188,73 +202,112 @@ export default function App() {
 
   // --- Engine Logic ---
 
-  const runScan = () => {
+  const runMoveDetection = useCallback((root: FileNode) => {
+    const moves: MoveAction[] = [];
+
+    // Recursive scan helper
+    const scanNodes = (nodes: FileNode[], parentName: string = '') => {
+      nodes.forEach(item => {
+         let move: Partial<MoveAction> | null = null;
+
+         // 0. Inbox / Unsorted
+         if (item.name === '_UNSORTED_DESKTOP') {
+           move = { target: 'VACUUM', reason: 'Cleanup' };
+           if (item.children) scanNodes(item.children, item.name);
+         }
+         // 1. Configs
+         else if (item.name.startsWith('.')) {
+           if (item.name === '.dotnet') move = { target: '02_Studio/SDKs', reason: 'SDK' };
+           else move = { target: '02_Studio/Config', reason: 'Config' };
+         }
+         // 2. Folders
+         else if (item.type === 'folder') {
+           if (item.children?.length === 0) {
+             move = { target: 'VACUUM', reason: 'Empty Dir' };
+           } else if (item.name.includes('NextJS')) {
+             move = { target: '01_Build/Web', reason: 'Active' };
+           } else if (item.name.includes('Unity')) {
+             if ((item.age || 0) > 180) move = { target: '99_Archives/2023', reason: `Stale (${item.age}d)` };
+             else move = { target: '01_Build/Interactive', reason: 'Active' };
+           } else if (item.name.includes('PyTorch')) {
+              move = { target: '01_Build/Data', reason: 'Python Env' };
+           }
+         }
+         // 3. Files
+         else if (item.type === 'file') {
+           if (item.name.includes('Invoice')) move = { target: '04_Private/Financial', reason: 'Taxonomy' };
+           if (item.name.includes('NDA')) move = { target: '04_Private/Legal', reason: 'Taxonomy' };
+           if (item.name.includes('Blood')) move = { target: '04_Private/Medical', reason: 'Taxonomy' };
+           if (item.name.includes('Passport')) move = { target: '04_Private/Identity', reason: 'Taxonomy' };
+           if (item.name.includes('Book')) move = { target: '03_Library/Books', reason: 'Reference' };
+           if (item.name.includes('Cheatsheet')) move = { target: '03_Library/Cheatsheets', reason: 'Reference' };
+           if (item.name.includes('Export') || item.name.includes('Screenshot')) move = { target: '05_Stage/Exports', reason: 'Deliverable' };
+
+           if (!move && parentName === '_UNSORTED_DESKTOP') {
+             move = { target: '00_Inbox', reason: 'Inbox Item' };
+           }
+         }
+
+         if (move) moves.push({ item, ...move } as MoveAction);
+      });
+    };
+
+    if (root.children) {
+      scanNodes(root.children);
+    }
+
+    setProposedMoves(moves);
+    addLog(`Scan Complete. ${moves.length} optimization actions identified.`, "success");
+    setProgress(100);
+    setAppState('REVIEW');
+  }, [addLog]);
+
+  const runScan = async () => {
     setAppState('SCANNING');
     addLog("Initializing Heuristic Engine v3.0.0...", "system");
     setProgress(10);
 
-    setTimeout(() => {
-      addLog("Scanning directory structure at C:/Users/Developer...", "info");
-      setProgress(40);
-      
-      const moves: MoveAction[] = [];
-      
-      // Recursive scan helper
-      const scanNodes = (nodes: FileNode[], parentName: string = '') => {
-        nodes.forEach(item => {
-           let move: Partial<MoveAction> | null = null;
-           
-           // 0. Inbox / Unsorted
-           if (item.name === '_UNSORTED_DESKTOP') {
-             move = { target: 'VACUUM', reason: 'Cleanup' };
-             if (item.children) scanNodes(item.children, item.name);
-           }
-           // 1. Configs
-           else if (item.name.startsWith('.')) {
-             if (item.name === '.dotnet') move = { target: '02_Studio/SDKs', reason: 'SDK' };
-             else move = { target: '02_Studio/Config', reason: 'Config' };
-           } 
-           // 2. Folders
-           else if (item.type === 'folder') {
-             if (item.children?.length === 0) {
-               move = { target: 'VACUUM', reason: 'Empty Dir' };
-             } else if (item.name.includes('NextJS')) {
-               move = { target: '01_Build/Web', reason: 'Active' };
-             } else if (item.name.includes('Unity')) {
-               if ((item.age || 0) > 180) move = { target: '99_Archives/2023', reason: `Stale (${item.age}d)` };
-               else move = { target: '01_Build/Interactive', reason: 'Active' };
-             } else if (item.name.includes('PyTorch')) {
-                move = { target: '01_Build/Data', reason: 'Python Env' };
-             }
-           }
-           // 3. Files
-           else if (item.type === 'file') {
-             if (item.name.includes('Invoice')) move = { target: '04_Private/Financial', reason: 'Taxonomy' };
-             if (item.name.includes('NDA')) move = { target: '04_Private/Legal', reason: 'Taxonomy' };
-             if (item.name.includes('Blood')) move = { target: '04_Private/Medical', reason: 'Taxonomy' };
-             if (item.name.includes('Passport')) move = { target: '04_Private/Identity', reason: 'Taxonomy' };
-             if (item.name.includes('Book')) move = { target: '03_Library/Books', reason: 'Reference' };
-             if (item.name.includes('Cheatsheet')) move = { target: '03_Library/Cheatsheets', reason: 'Reference' };
-             if (item.name.includes('Export') || item.name.includes('Screenshot')) move = { target: '05_Stage/Exports', reason: 'Deliverable' };
+    // If using real file system, call API
+    if (useRealFS && scanPath) {
+      try {
+        addLog(`Scanning real directory: ${scanPath}`, "info");
+        setProgress(30);
 
-             if (!move && parentName === '_UNSORTED_DESKTOP') {
-               move = { target: '00_Inbox', reason: 'Inbox Item' };
-             }
-           }
-
-           if (move) moves.push({ item, ...move } as MoveAction);
+        const response = await fetch('http://localhost:3001/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: scanPath, maxDepth: scanDepth })
         });
-      };
 
-      if (fileSystem.root.children) {
-        scanNodes(fileSystem.root.children);
+        if (!response.ok) {
+          throw new Error('Failed to scan directory');
+        }
+
+        const data = await response.json();
+        setFileSystem({ root: data.root });
+        addLog("Real file system loaded successfully", "success");
+        setProgress(60);
+
+        // Continue with move detection
+        setTimeout(() => {
+          runMoveDetection(data.root);
+        }, 500);
+      } catch (error) {
+        addLog(`Error scanning directory: ${error instanceof Error ? error.message : 'Unknown error'}`, "error");
+        setAppState('IDLE');
+        setProgress(0);
       }
+      return;
+    }
+
+    // Original mock scan logic
+    setTimeout(() => {
+      addLog("Scanning mock directory structure at C:/Users/Developer...", "info");
+      setProgress(40);
 
       setTimeout(() => {
-        setProposedMoves(moves);
-        addLog(`Scan Complete. ${moves.length} optimization actions identified.`, "success");
-        setProgress(100);
-        setAppState('REVIEW');
+        setProgress(80);
+        runMoveDetection(fileSystem.root);
       }, 800);
     }, 800);
   };
@@ -341,7 +394,70 @@ export default function App() {
                   </span>
                   {appState === 'EXECUTED' && <CheckCircle className="w-4 h-4 text-emerald-500" />}
                 </div>
-                
+
+                {/* Real FS Toggle & Path Input */}
+                {appState !== 'EXECUTED' && (
+                  <>
+                    <div className="flex items-center gap-2 mb-2">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={useRealFS}
+                          onChange={(e) => setUseRealFS(e.target.checked)}
+                          className="w-3.5 h-3.5 rounded bg-slate-950 border-slate-700 text-blue-600 focus:ring-blue-500/20 focus:ring-offset-0"
+                        />
+                        <span className="text-xs text-slate-400 font-medium">
+                          {useRealFS ? 'Real File System' : 'Mock Data'}
+                        </span>
+                      </label>
+                    </div>
+                    {useRealFS && (
+                      <>
+                        <div className="mb-2 flex gap-2">
+                          <input
+                            type="text"
+                            placeholder="Enter directory path..."
+                            value={scanPath}
+                            onChange={(e) => setScanPath(e.target.value)}
+                            className="flex-1 bg-slate-950 border border-slate-800 rounded text-xs py-1.5 px-3 text-slate-300 placeholder:text-slate-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all font-mono"
+                          />
+                          <button
+                            onClick={() => setShowFolderBrowser(true)}
+                            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-slate-300 transition-colors flex items-center gap-1.5"
+                            title="Browse folders"
+                          >
+                            <FolderOpen className="w-3.5 h-3.5" />
+                            <span className="text-xs">Browse</span>
+                          </button>
+                        </div>
+                        <div className="mb-2">
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                              Scan Depth: {scanDepth} {scanDepth > 5 && <span className="text-yellow-500">⚠</span>}
+                            </label>
+                            <span className="text-[9px] text-slate-600">
+                              {scanDepth <= 3 ? 'Fast' : scanDepth <= 5 ? 'Medium' : 'Slow'}
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min="1"
+                            max="10"
+                            value={scanDepth}
+                            onChange={(e) => setScanDepth(parseInt(e.target.value))}
+                            className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                          />
+                          {scanDepth > 5 && (
+                            <div className="mt-1 text-[9px] text-yellow-500/80">
+                              Deep scans may take longer
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+
                 {/* Search & Sort Bar */}
                 {appState !== 'EXECUTED' && (
                   <div className="flex gap-2">
@@ -683,6 +799,14 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Folder Browser Modal */}
+      <FolderBrowser
+        isOpen={showFolderBrowser}
+        onClose={() => setShowFolderBrowser(false)}
+        onSelect={(path) => setScanPath(path)}
+        currentPath={scanPath}
+      />
     </div>
   );
 }
