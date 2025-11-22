@@ -1,0 +1,5 @@
+{
+  "targetDirectory": "",
+  "maxScanDepth": 5,
+  "apiUrl": "http://localhost:3001"
+}

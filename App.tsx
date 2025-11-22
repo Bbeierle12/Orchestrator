@@ -74,18 +74,63 @@ const LogLine: React.FC<{ log: LogEntry }> = ({ log }) => {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('SIMULATOR');
-  const [fileSystem] = useState<FileSystemState>(INITIAL_FILE_SYSTEM);
+  const [fileSystem, setFileSystem] = useState<FileSystemState>(INITIAL_FILE_SYSTEM);
   const [proposedMoves, setProposedMoves] = useState<MoveAction[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [appState, setAppState] = useState<AppState>('IDLE'); 
+  const [appState, setAppState] = useState<AppState>('IDLE');
   const [progress, setProgress] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortOption, setSortOption] = useState<SortOption>('name-asc');
+  const [targetPath, setTargetPath] = useState('');
+  const [useRealFiles, setUseRealFiles] = useState(false);
+  const [apiUrl] = useState('http://localhost:3001');
 
   const addLog = useCallback((msg: string, type: LogEntry['type'] = 'info') => {
     const ts = new Date().toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
     setLogs(prev => [{ msg, type, timestamp: ts }, ...prev]);
   }, []);
+
+  // Fetch real directory data from API
+  const fetchDirectoryData = useCallback(async (path: string) => {
+    try {
+      const response = await fetch(`${apiUrl}/api/scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetPath: path, maxDepth: 5 })
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to scan directory');
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      throw error;
+    }
+  }, [apiUrl]);
+
+  // Execute real file moves via API
+  const executeFileMoves = useCallback(async (moves: any[], basePath: string) => {
+    try {
+      const response = await fetch(`${apiUrl}/api/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moves, basePath })
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to execute moves');
+      }
+
+      const data = await response.json();
+      return data;
+    } catch (error) {
+      throw error;
+    }
+  }, [apiUrl]);
 
   // --- File System Logic (Search & Sort) ---
 
@@ -188,22 +233,41 @@ export default function App() {
 
   // --- Engine Logic ---
 
-  const runScan = () => {
+  const runScan = async () => {
     setAppState('SCANNING');
     addLog("Initializing Heuristic Engine v3.0.0...", "system");
     setProgress(10);
 
+    // If using real files, fetch from API first
+    if (useRealFiles && targetPath) {
+      try {
+        addLog(`Scanning real directory: ${targetPath}...`, "info");
+        setProgress(30);
+
+        const data = await fetchDirectoryData(targetPath);
+        setFileSystem(data);
+        addLog("Directory scan complete. Analyzing structure...", "success");
+        setProgress(50);
+      } catch (error) {
+        addLog(`Error scanning directory: ${error instanceof Error ? error.message : 'Unknown error'}`, "error");
+        setAppState('IDLE');
+        setProgress(0);
+        return;
+      }
+    }
+
     setTimeout(() => {
-      addLog("Scanning directory structure at C:/Users/Developer...", "info");
-      setProgress(40);
-      
+      const scanPath = useRealFiles ? targetPath : "C:/Users/Developer";
+      addLog(`Analyzing directory structure at ${scanPath}...`, "info");
+      setProgress(60);
+
       const moves: MoveAction[] = [];
-      
+
       // Recursive scan helper
       const scanNodes = (nodes: FileNode[], parentName: string = '') => {
         nodes.forEach(item => {
            let move: Partial<MoveAction> | null = null;
-           
+
            // 0. Inbox / Unsorted
            if (item.name === '_UNSORTED_DESKTOP') {
              move = { target: 'VACUUM', reason: 'Cleanup' };
@@ -213,7 +277,7 @@ export default function App() {
            else if (item.name.startsWith('.')) {
              if (item.name === '.dotnet') move = { target: '02_Studio/SDKs', reason: 'SDK' };
              else move = { target: '02_Studio/Config', reason: 'Config' };
-           } 
+           }
            // 2. Folders
            else if (item.type === 'folder') {
              if (item.children?.length === 0) {
@@ -259,25 +323,75 @@ export default function App() {
     }, 800);
   };
 
-  const execute = () => {
+  const execute = async () => {
     setAppState('PROCESSING');
-    let currentStep = 0;
-    const totalSteps = proposedMoves.length;
-    
-    const interval = setInterval(() => {
-      if (currentStep >= totalSteps) {
-        clearInterval(interval);
+
+    if (useRealFiles && targetPath) {
+      // Real file execution via API
+      try {
+        addLog("Preparing to execute file operations...", "system");
+        setProgress(10);
+
+        // Build full source paths for each move
+        const buildFullPath = (node: FileNode, rootPath: string, currentPath: string = ''): string => {
+          return `${rootPath}/${currentPath}${node.name}`.replace(/\/+/g, '/');
+        };
+
+        const movesWithPaths = proposedMoves.map((move, index) => {
+          const sourcePath = buildFullPath(move.item, targetPath, '');
+          const targetRelative = move.target === 'VACUUM' ? '' : `${move.target}/${move.item.name}`;
+
+          return {
+            sourcePath,
+            targetPath: targetRelative,
+            operation: move.target === 'VACUUM' ? 'VACUUM' : 'MOVE',
+            itemName: move.item.name
+          };
+        });
+
+        addLog(`Executing ${movesWithPaths.length} file operations...`, "info");
+        const result = await executeFileMoves(movesWithPaths, targetPath);
+
+        // Log results
+        result.results?.forEach((res: any) => {
+          if (res.operation === 'deleted') {
+            addLog(`Vacuumed: ${res.sourcePath}`, "archive");
+          } else {
+            addLog(`Moved: ${res.sourcePath} -> ${res.targetPath}`, "action");
+          }
+        });
+
+        result.errors?.forEach((err: any) => {
+          addLog(`Error: ${err.error}`, "error");
+        });
+
+        setProgress(100);
         setAppState('EXECUTED');
-        addLog("Orchestration Complete. Workspace reorganized to v3 Standard.", "success");
-        return;
+        addLog(`Orchestration Complete. ${result.summary.succeeded} succeeded, ${result.summary.failed} failed.`, "success");
+      } catch (error) {
+        addLog(`Execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`, "error");
+        setAppState('IDLE');
       }
-      const move = proposedMoves[currentStep];
-      if (move.target === 'VACUUM') addLog(`Vacuumed: ${move.item.name}`, "archive");
-      else addLog(`Moved: ${move.item.name} -> ${move.target}`, "action");
-      
-      setProgress(((currentStep + 1) / totalSteps) * 100);
-      currentStep++;
-    }, 300);
+    } else {
+      // Simulated execution
+      let currentStep = 0;
+      const totalSteps = proposedMoves.length;
+
+      const interval = setInterval(() => {
+        if (currentStep >= totalSteps) {
+          clearInterval(interval);
+          setAppState('EXECUTED');
+          addLog("Orchestration Complete (Simulated). Workspace reorganized to v3 Standard.", "success");
+          return;
+        }
+        const move = proposedMoves[currentStep];
+        if (move.target === 'VACUUM') addLog(`Vacuumed: ${move.item.name}`, "archive");
+        else addLog(`Moved: ${move.item.name} -> ${move.target}`, "action");
+
+        setProgress(((currentStep + 1) / totalSteps) * 100);
+        currentStep++;
+      }, 300);
+    }
   };
 
   const undo = () => {
@@ -294,36 +408,80 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen bg-slate-950 text-slate-200 font-sans overflow-hidden">
       {/* Header */}
-      <div className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-10">
-        <div className="flex items-center gap-3">
-          <div className="bg-blue-600 p-2 rounded-lg shadow-lg shadow-blue-900/50">
-            <Layout className="text-white w-5 h-5" />
+      <div className="bg-slate-900 border-b border-slate-800 shrink-0 z-10">
+        <div className="h-16 flex items-center justify-between px-6">
+          <div className="flex items-center gap-3">
+            <div className="bg-blue-600 p-2 rounded-lg shadow-lg shadow-blue-900/50">
+              <Layout className="text-white w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="font-bold text-white text-lg leading-none tracking-tight">THE ORCHESTRATOR</h1>
+              <div className="text-[10px] text-blue-400 font-bold tracking-[0.2em] mt-1 uppercase opacity-80">Phase 6 • Production Suite</div>
+            </div>
           </div>
-          <div>
-            <h1 className="font-bold text-white text-lg leading-none tracking-tight">THE ORCHESTRATOR</h1>
-            <div className="text-[10px] text-blue-400 font-bold tracking-[0.2em] mt-1 uppercase opacity-80">Phase 6 • Production Suite</div>
+          <div className="flex gap-2">
+            <TabButton
+              active={activeTab === 'SIMULATOR'}
+              label="SIMULATOR"
+              icon={Cpu}
+              onClick={() => setActiveTab('SIMULATOR')}
+            />
+            <TabButton
+              active={activeTab === 'SOURCE_CODE'}
+              label="SOURCE"
+              icon={FileCode}
+              onClick={() => setActiveTab('SOURCE_CODE')}
+            />
+            <TabButton
+              active={activeTab === 'DOCS'}
+              label="DOCS"
+              icon={BookOpen}
+              onClick={() => setActiveTab('DOCS')}
+            />
           </div>
         </div>
-        <div className="flex gap-2">
-          <TabButton 
-            active={activeTab === 'SIMULATOR'} 
-            label="SIMULATOR" 
-            icon={Cpu}
-            onClick={() => setActiveTab('SIMULATOR')} 
-          />
-          <TabButton 
-            active={activeTab === 'SOURCE_CODE'} 
-            label="SOURCE" 
-            icon={FileCode}
-            onClick={() => setActiveTab('SOURCE_CODE')} 
-          />
-          <TabButton 
-            active={activeTab === 'DOCS'} 
-            label="DOCS" 
-            icon={BookOpen}
-            onClick={() => setActiveTab('DOCS')} 
-          />
-        </div>
+
+        {/* Configuration Bar */}
+        {activeTab === 'SIMULATOR' && (
+          <div className="px-6 py-3 bg-slate-900/50 border-t border-slate-800/50 flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <Shield className="w-4 h-4 text-slate-500" />
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Mode:</label>
+              <button
+                onClick={() => {
+                  setUseRealFiles(!useRealFiles);
+                  if (!useRealFiles) {
+                    addLog("Switched to Real File System Mode", "system");
+                  } else {
+                    addLog("Switched to Simulation Mode", "system");
+                    setFileSystem(INITIAL_FILE_SYSTEM);
+                  }
+                }}
+                className={`px-3 py-1 rounded text-xs font-bold transition-all ${
+                  useRealFiles
+                    ? 'bg-emerald-600 text-white shadow-emerald-900/20'
+                    : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+                }`}
+              >
+                {useRealFiles ? 'REAL FILES' : 'SIMULATION'}
+              </button>
+            </div>
+
+            {useRealFiles && (
+              <div className="flex items-center gap-2 flex-1">
+                <HardDrive className="w-4 h-4 text-slate-500" />
+                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Target:</label>
+                <input
+                  type="text"
+                  value={targetPath}
+                  onChange={(e) => setTargetPath(e.target.value)}
+                  placeholder="/path/to/directory or C:\Users\YourName"
+                  className="flex-1 max-w-md bg-slate-950 border border-slate-800 rounded text-xs py-1.5 px-3 text-slate-300 placeholder:text-slate-600 focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
+                />
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Main Content */}
